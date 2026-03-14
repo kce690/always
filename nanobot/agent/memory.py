@@ -64,6 +64,12 @@ _TOOL_CHOICE_ERROR_MARKERS = (
     "does not support",
     'should be ["none", "auto"]',
 )
+_INTERNAL_ARCHIVE_MARKERS = (
+    "i've completed processing but have no response to give",
+    "no response",
+    "empty response",
+    "internal fallback",
+)
 
 
 def _is_tool_choice_unsupported(content: str | None) -> bool:
@@ -103,11 +109,24 @@ class MemoryStore:
     def _format_messages(messages: list[dict]) -> str:
         lines = []
         for message in messages:
-            if not message.get("content"):
+            content = message.get("content")
+            role = str(message.get("role", ""))
+            if not content:
                 continue
+            if role in {"tool", "system"}:
+                continue
+            if isinstance(content, str):
+                text = content.strip()
+                if not text:
+                    continue
+                lowered = text.lower()
+                if any(marker in lowered for marker in _INTERNAL_ARCHIVE_MARKERS):
+                    continue
+                if text.startswith("[Runtime Context"):
+                    continue
             tools = f" [tools: {', '.join(message['tools_used'])}]" if message.get("tools_used") else ""
             lines.append(
-                f"[{message.get('timestamp', '?')[:16]}] {message['role'].upper()}{tools}: {message['content']}"
+                f"[{message.get('timestamp', '?')[:16]}] {role.upper()}{tools}: {content}"
             )
         return "\n".join(lines)
 
@@ -275,7 +294,7 @@ class MemoryConsolidator:
 
     def estimate_session_prompt_tokens(self, session: Session) -> tuple[int, str]:
         """Estimate current prompt size for the normal session history view."""
-        history = session.get_history(max_messages=0)
+        history = session.get_history(max_messages=0, include_assistant_text=False)
         channel, chat_id = (session.key.split(":", 1) if ":" in session.key else (None, None))
         probe_messages = self._build_messages(
             history=history,

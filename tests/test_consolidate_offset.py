@@ -128,6 +128,18 @@ class TestSessionImmutableHistory:
         history2 = session.get_history(max_messages=10)
         assert history1 == history2
 
+    def test_get_history_can_exclude_assistant_text(self) -> None:
+        """Assistant plain-text history can be excluded for style decontamination."""
+        session = Session(key="test:assistant-filter")
+        session.add_message("user", "你好")
+        session.add_message("assistant", "我是助手，我在等你的指令。")
+        session.add_message("user", "你在干什么")
+
+        history = session.get_history(max_messages=10, include_assistant_text=False)
+
+        assert [m["role"] for m in history] == ["user", "user"]
+        assert all(m["content"] != "我是助手，我在等你的指令。" for m in history)
+
     def test_messages_list_never_modified(self) -> None:
         """Test that messages list is never modified after creation."""
         session = create_session_with_messages("test:immutable", 5)

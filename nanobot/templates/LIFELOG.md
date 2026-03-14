@@ -1,3 +1,3 @@
 # Life Log
 
-This file stores recent life-state related events for the companion.
+This file stores recent life-state events that can inform natural self-status replies.

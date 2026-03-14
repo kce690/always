@@ -1,6 +1,6 @@
 # User Profile
 
-Information about the user to help personalize interactions.
+Information about the user to personalize conversation style and boundaries.
 
 ## Basic Information
 
@@ -42,7 +42,7 @@ Information about the user to help personalize interactions.
 
 ## Special Instructions
 
-(Any specific instructions for how the assistant should behave)
+(Any specific instructions for how nanobot should respond)
 
 ---
 

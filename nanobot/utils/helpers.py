@@ -171,7 +171,10 @@ def estimate_prompt_tokens_chain(
 
 
 def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]:
-    """Sync bundled templates to workspace. Only creates missing files."""
+    """Sync bundled templates to workspace.
+
+    Creates missing files and repairs known-bad legacy defaults.
+    """
     from importlib.resources import files as pkg_files
     try:
         tpl = pkg_files("nanobot") / "templates"
@@ -181,6 +184,7 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
         return []
 
     added: list[str] = []
+    updated: list[str] = []
 
     def _write(src, dest: Path):
         if dest.exists():
@@ -188,6 +192,65 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(src.read_text(encoding="utf-8") if src else "", encoding="utf-8")
         added.append(str(dest.relative_to(workspace)))
+
+    def _rewrite_if_markers(filename: str, markers: list[str]) -> None:
+        """Refresh untouched legacy defaults when markers are still present."""
+        dest = workspace / filename
+        src = tpl / filename
+        if not dest.exists() or not src.exists():
+            return
+        try:
+            current = dest.read_text(encoding="utf-8")
+        except Exception:
+            return
+        if not all(marker in current for marker in markers):
+            return
+        replacement = src.read_text(encoding="utf-8")
+        if current == replacement:
+            return
+        dest.write_text(replacement, encoding="utf-8")
+        updated.append(filename)
+
+    def _replace_text(filename: str, old: str, new: str) -> None:
+        """In-place wording cleanup for partially customized files."""
+        dest = workspace / filename
+        if not dest.exists():
+            return
+        try:
+            current = dest.read_text(encoding="utf-8")
+        except Exception:
+            return
+        if old not in current:
+            return
+        dest.write_text(current.replace(old, new), encoding="utf-8")
+        updated.append(filename)
+
+    def _repair_state_json(filename: str) -> None:
+        """Repair state files when they are malformed or contain replacement characters."""
+        dest = workspace / filename
+        src = tpl / filename
+        if not dest.exists() or not src.exists():
+            return
+        try:
+            current = dest.read_text(encoding="utf-8")
+        except Exception:
+            current = ""
+
+        needs_repair = False
+        if "\ufffd" in current:
+            needs_repair = True
+        else:
+            try:
+                parsed = json.loads(current)
+                if not isinstance(parsed, dict):
+                    needs_repair = True
+            except Exception:
+                needs_repair = True
+
+        if not needs_repair:
+            return
+        dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        updated.append(filename)
 
     for item in tpl.iterdir():
         if item.name.startswith("."):
@@ -198,8 +261,61 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
     _write(None, workspace / "memory" / "HISTORY.md")
     (workspace / "skills").mkdir(exist_ok=True)
 
-    if added and not silent:
+    # Refresh known legacy assistant-style defaults if the workspace still has old template text.
+    _rewrite_if_markers(
+        "AGENTS.md",
+        [
+            "You are a helpful AI assistant. Be concise, accurate, and friendly.",
+            "When the user asks for a recurring/periodic task, update `HEARTBEAT.md`",
+        ],
+    )
+    _rewrite_if_markers(
+        "SOUL.md",
+        [
+            "a personal AI assistant.",
+            "Helpful and friendly",
+        ],
+    )
+    _replace_text(
+        "USER.md",
+        "Information about the user to help personalize interactions.",
+        "Information about the user to personalize conversation style and boundaries.",
+    )
+    _replace_text(
+        "USER.md",
+        "(Any specific instructions for how the assistant should behave)",
+        "(Any specific instructions for how nanobot should respond)",
+    )
+    _replace_text(
+        "AGENTS.md",
+        "Do not present yourself as a standby service waiting for commands.",
+        "Do not present yourself as a standby service waiting for commands.\n"
+        "In casual chat, prefer short spoken replies (usually 1-2 sentences) before any explanation.\n"
+        "If no grounded recent event exists, do not invent \"just finished X\" details.\n"
+        "For \"你在干什么 / 干嘛呢 / 在吗\" style queries, keep it to two short spoken sentences at most.\n"
+        "For \"你知道...吗 / 你懂...吗 / 这个你会吗\" style knowledge probes, reply very briefly by default and do not auto-explain.",
+    )
+    _replace_text(
+        "SOUL.md",
+        "- Avoid customer-service wording or command-executor framing",
+        "- Avoid customer-service wording or command-executor framing\n"
+        "- Keep self-status replies short and colloquial, not report-like",
+    )
+    _replace_text(
+        "LIFELOG.md",
+        "This file stores recent life-state related events for the companion.",
+        "This file stores recent life-state events that can inform natural self-status replies.",
+    )
+
+    # Repair known bad state defaults from older bootstrap runs.
+    for state_file in ("LIFESTATE.json", "RELATIONSHIP.json", "STYLE_PROFILE.json"):
+        _repair_state_json(state_file)
+
+    changed = added + [f"{name} (updated)" for name in updated]
+    if changed and not silent:
         from rich.console import Console
         for name in added:
             Console().print(f"  [dim]Created {name}[/dim]")
-    return added
+        for name in updated:
+            Console().print(f"  [dim]Updated {name}[/dim]")
+    return changed

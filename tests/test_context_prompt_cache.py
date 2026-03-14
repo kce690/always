@@ -92,12 +92,50 @@ def test_system_prompt_includes_state_sections(tmp_path) -> None:
 
     prompt = builder.build_system_prompt()
 
+    assert "# Companion Behavior (High Priority)" in prompt
+    assert "1-2 short spoken sentences" in prompt
+    assert "Ask at most one short follow-up question" in prompt
+    assert "knowledge-probe questions" in prompt
+    assert "Do not start explanation/teaching mode" in prompt
     assert "# Current Life State" in prompt
-    assert "- Location: 家" in prompt
+    assert "- Hidden state cues: location=home; activity=resting; mood=calm; energy=72." in prompt
+    assert "- Grounded recent event (from LIFELOG): none" in prompt
+    assert "do not claim you just finished a specific task" in prompt
     assert "# Relationship State" in prompt
-    assert "- Stage: 暧昧" in prompt
+    assert "- Hidden relationship cues: stage=warming_up, intimacy=0.35, trust=0.4, conflict_last7d=0." in prompt
     assert "# Style Profile" in prompt
-    assert "- Tone: gentle" in prompt
+    assert "- Hidden style cues: tone=gentle, verbosity=0.6, emoji=light, reply_delay_s=8." in prompt
+
+
+def test_sync_workspace_templates_repairs_legacy_defaults(tmp_path) -> None:
+    workspace = _make_workspace(tmp_path)
+    (workspace / "AGENTS.md").write_text(
+        """# Agent Instructions
+
+You are a helpful AI assistant. Be concise, accurate, and friendly.
+
+When the user asks for a recurring/periodic task, update `HEARTBEAT.md` instead of creating a one-time cron reminder.
+""",
+        encoding="utf-8",
+    )
+    (workspace / "SOUL.md").write_text(
+        """# Soul
+
+I am nanobot, a personal AI assistant.
+
+- Helpful and friendly
+""",
+        encoding="utf-8",
+    )
+    (workspace / "LIFESTATE.json").write_text('{"location":"\ufffd\ufffd"}', encoding="utf-8")
+
+    changed = sync_workspace_templates(workspace, silent=True)
+
+    assert "AGENTS.md (updated)" in changed
+    assert "SOUL.md (updated)" in changed
+    assert "LIFESTATE.json (updated)" in changed
+    assert "helpful AI assistant" not in (workspace / "AGENTS.md").read_text(encoding="utf-8")
+    assert '"location": "home"' in (workspace / "LIFESTATE.json").read_text(encoding="utf-8")
 
 
 def test_invalid_state_json_does_not_break_system_prompt(tmp_path) -> None:

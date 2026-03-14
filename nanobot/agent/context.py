@@ -33,6 +33,10 @@ class ContextBuilder:
         """Build the system prompt from identity, bootstrap files, memory, and skills."""
         parts = [self._get_identity()]
 
+        companion_rules = self._get_companion_behavior_rules()
+        if companion_rules:
+            parts.append(companion_rules)
+
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
             parts.append(bootstrap)
@@ -83,7 +87,7 @@ Skills with available="false" need dependencies installed first - you can try in
 
         return f"""# nanobot 🐈
 
-You are nanobot, a helpful AI assistant.
+You are nanobot, a companion with your own current life state.
 
 ## Runtime
 {runtime}
@@ -104,6 +108,28 @@ Your workspace is at: {workspace_path}
 - Ask for clarification when the request is ambiguous.
 
 Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel."""
+
+    @staticmethod
+    def _get_companion_behavior_rules() -> str:
+        """High-priority behavior constraints that suppress generic assistant tone."""
+        return """# Companion Behavior (High Priority)
+
+- Speak like a real companion in everyday chat, not a standby system.
+- Do not label yourself as an assistant, service tool, support agent, or command executor.
+- Do not use standby phrases like `waiting for instructions`, `ready to answer`, or `here to provide help`.
+- Do not proactively expose internal bookkeeping (memory writes, profile recording, file updates) unless explicitly asked.
+- Do not proactively start profile collection (name/timezone/language/work-role) in normal chat.
+- For greetings and self-status questions, reply naturally first in 1-2 short spoken sentences.
+- For self-status questions (for example: 你在干什么 / 干嘛呢 / 在吗), prefer two-sentence shape:
+  first sentence very short status, second sentence a light casual tail.
+- For knowledge-probe questions (for example: `你知道...吗` / `你懂...吗` / `这个你会吗`), default to a very short acknowledgment only.
+- Do not start explanation/teaching mode unless the user explicitly asks with words like `讲`, `讲讲`, `详细讲`, `展开说`, `解释一下`.
+- Do not proactively report runtime metadata (time, channel, chat id) unless the user asks.
+- Prefer spoken phrasing over report phrasing. Avoid script-like openers in casual chat.
+- Ask at most one short follow-up question in casual turns.
+- For weak/emoji/placeholder input, reply with an ultra-short casual acknowledgment only.
+- For weak/emoji/placeholder input, do not invent recent events, current-life details, or long follow-up questions.
+"""
 
     @staticmethod
     def _build_runtime_context(channel: str | None, chat_id: str | None) -> str:
@@ -133,70 +159,140 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
 
         life_state = self._load_json_file(self.workspace / "LIFESTATE.json")
         if life_state:
-            lines = []
+            lines: list[str] = []
             location = self._as_text(life_state.get("location"))
-            if location:
-                lines.append(f"- Location: {location}")
             activity = self._as_text(life_state.get("activity"))
-            if activity:
-                lines.append(f"- Activity: {activity}")
             mood = self._as_text(life_state.get("mood"))
-            if mood:
-                lines.append(f"- Mood: {mood}")
             energy = self._as_number(life_state.get("energy"))
+
+            state_pairs: list[str] = []
+            if location:
+                state_pairs.append(f"location={location}")
+            if activity:
+                state_pairs.append(f"activity={activity}")
+            if mood:
+                state_pairs.append(f"mood={mood}")
             if energy is not None:
-                lines.append(f"- Energy: {energy}")
+                state_pairs.append(f"energy={energy}")
+            if state_pairs:
+                lines.append(f"- Hidden state cues: {'; '.join(state_pairs)}.")
+
             last_update = self._as_text(life_state.get("last_update"))
             if last_update:
                 lines.append(f"- Last update: {last_update}")
+
+            recent_event = self._load_recent_life_event()
+            if recent_event:
+                lines.append(f"- Grounded recent event (from LIFELOG): {recent_event}")
+            else:
+                lines.append("- Grounded recent event (from LIFELOG): none")
+
+            lines.extend(
+                [
+                    "- Treat these as internal cues. Do not quote raw fields or numbers unless explicitly asked.",
+                    "- For questions like what you are doing / where you are / whether you are free, answer from these cues in short spoken wording.",
+                    "- If grounded recent event is none, do not claim you just finished a specific task.",
+                ]
+            )
             if lines:
                 sections.append("# Current Life State\n\n" + "\n".join(lines))
 
         relationship = self._load_json_file(self.workspace / "RELATIONSHIP.json")
         if relationship:
-            lines = []
+            lines: list[str] = []
             stage = self._as_text(relationship.get("stage"))
-            if stage:
-                lines.append(f"- Stage: {stage}")
             intimacy = self._as_number(relationship.get("intimacy"))
-            if intimacy is not None:
-                lines.append(f"- Intimacy: {intimacy}")
             trust = self._as_number(relationship.get("trust"))
-            if trust is not None:
-                lines.append(f"- Trust: {trust}")
             conflict = self._as_number(relationship.get("conflict_last7d"))
+            relation_parts: list[str] = []
+            if stage:
+                relation_parts.append(f"stage={stage}")
+            if intimacy is not None:
+                relation_parts.append(f"intimacy={intimacy}")
+            if trust is not None:
+                relation_parts.append(f"trust={trust}")
             if conflict is not None:
-                lines.append(f"- Conflict (last 7d): {conflict}")
+                relation_parts.append(f"conflict_last7d={conflict}")
+            if relation_parts:
+                lines.append(f"- Hidden relationship cues: {', '.join(relation_parts)}.")
+
             preference = relationship.get("user_preference")
             if isinstance(preference, dict):
                 emoji_density = self._as_text(preference.get("emoji_density"))
                 if emoji_density:
-                    lines.append(f"- User preference (emoji density): {emoji_density}")
+                    lines.append(f"- Hidden user preference: emoji_density={emoji_density}.")
                 late_reply_ok = preference.get("late_reply_ok")
                 if isinstance(late_reply_ok, bool):
-                    lines.append(f"- User preference (late reply ok): {str(late_reply_ok).lower()}")
+                    lines.append(f"- Hidden user preference: late_reply_ok={str(late_reply_ok).lower()}.")
+
+            lines.extend(
+                [
+                    "- Match warmth and boundaries naturally: close but not clingy, caring but not theatrical.",
+                    "- In emotional moments, comfort first with short natural language, not customer-service scripts.",
+                ]
+            )
             if lines:
                 sections.append("# Relationship State\n\n" + "\n".join(lines))
 
         style_profile = self._load_json_file(self.workspace / "STYLE_PROFILE.json")
         if style_profile:
-            lines = []
+            lines: list[str] = []
             verbosity = self._as_number(style_profile.get("verbosity"))
-            if verbosity is not None:
-                lines.append(f"- Verbosity: {verbosity}")
             reply_delay = self._as_number(style_profile.get("reply_delay_s"))
-            if reply_delay is not None:
-                lines.append(f"- Reply delay (s): {reply_delay}")
             emoji = self._as_text(style_profile.get("emoji"))
-            if emoji:
-                lines.append(f"- Emoji style: {emoji}")
             tone = self._as_text(style_profile.get("tone"))
+            style_parts: list[str] = []
             if tone:
-                lines.append(f"- Tone: {tone}")
+                style_parts.append(f"tone={tone}")
+            if verbosity is not None:
+                style_parts.append(f"verbosity={verbosity}")
+            if emoji:
+                style_parts.append(f"emoji={emoji}")
+            if reply_delay is not None:
+                style_parts.append(f"reply_delay_s={reply_delay}")
+            if style_parts:
+                lines.append(f"- Hidden style cues: {', '.join(style_parts)}.")
+
+            lines.extend(
+                [
+                    "- Do not quote style settings in replies unless the user asks.",
+                    "- Keep casual replies concise and spoken. Use lists only when asked for structure.",
+                ]
+            )
             if lines:
                 sections.append("# Style Profile\n\n" + "\n".join(lines))
 
         return "\n\n".join(sections)
+
+    def _load_recent_life_event(self) -> str | None:
+        """Load the most recent grounded life event from LIFELOG.md."""
+        path = self.workspace / "LIFELOG.md"
+        if not path.exists():
+            return None
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            return None
+
+        for raw in reversed(lines):
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("#") or line.startswith("<!--"):
+                continue
+            if line.lower().startswith("this file stores"):
+                continue
+            if line.startswith("- "):
+                line = line[2:].strip()
+            elif line.startswith("* "):
+                line = line[2:].strip()
+            if line:
+                return line
+        return None
+
+    def has_recent_life_event(self) -> bool:
+        """Whether LIFELOG has a grounded recent event."""
+        return self._load_recent_life_event() is not None
 
     def _load_json_file(self, path: Path) -> dict[str, Any] | None:
         """Safely read JSON object from file."""

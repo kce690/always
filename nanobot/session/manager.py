@@ -43,7 +43,12 @@ class Session:
         self.messages.append(msg)
         self.updated_at = datetime.now()
 
-    def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
+    def get_history(
+        self,
+        max_messages: int = 500,
+        *,
+        include_assistant_text: bool = True,
+    ) -> list[dict[str, Any]]:
         """Return unconsolidated messages for LLM input, aligned to a user turn."""
         unconsolidated = self.messages[self.last_consolidated:]
         sliced = unconsolidated[-max_messages:]
@@ -56,6 +61,10 @@ class Session:
 
         out: list[dict[str, Any]] = []
         for m in sliced:
+            role = m.get("role")
+            if not include_assistant_text and role in {"assistant", "tool"}:
+                continue
+
             entry: dict[str, Any] = {"role": m["role"], "content": m.get("content", "")}
             for k in ("tool_calls", "tool_call_id", "name"):
                 if k in m:
