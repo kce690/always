@@ -19,7 +19,12 @@ from nanobot.agent.memory import MemoryConsolidator
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
-from nanobot.agent.tools.life_state import LifeStateGetTool, LifeStateSetOverrideTool
+from nanobot.agent.tools.life_state import (
+    LifeStateGetTool,
+    LifeStatePrehistoryInfoTool,
+    LifeStatePrehistoryRegenerateTool,
+    LifeStateSetOverrideTool,
+)
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
@@ -178,6 +183,8 @@ class AgentLoop:
         if self.life_state_service:
             self.tools.register(LifeStateGetTool(self.life_state_service))
             self.tools.register(LifeStateSetOverrideTool(self.life_state_service))
+            self.tools.register(LifeStatePrehistoryInfoTool(self.life_state_service))
+            self.tools.register(LifeStatePrehistoryRegenerateTool(self.life_state_service))
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""

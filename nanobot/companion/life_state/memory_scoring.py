@@ -115,6 +115,10 @@ def assign_similarity_cluster(memory_type: str, gist_summary: str) -> str:
 
 def derive_gist_summary(event: dict[str, Any], *, summary: str) -> str:
     """Create semantic gist that can survive after detail fades."""
+    explicit_gist = compact_text(str(event.get("gist") or ""))
+    if explicit_gist:
+        return explicit_gist
+
     source = compact_text(str(event.get("source") or ""))
     lowered = summary.lower()
 
@@ -140,6 +144,10 @@ def derive_gist_summary(event: dict[str, Any], *, summary: str) -> str:
 
 def derive_detail_text(event: dict[str, Any], *, summary: str) -> str:
     """Create detail channel text separate from gist."""
+    explicit_detail = compact_text(str(event.get("detail") or ""))
+    if explicit_detail:
+        return explicit_detail
+
     parts = []
     if summary:
         parts.append(summary)
@@ -275,4 +283,3 @@ def looks_routine(text: str) -> bool:
 
 def _clamp01(value: float, *, hi: float = 1.0) -> float:
     return max(0.0, min(hi, float(value)))
-

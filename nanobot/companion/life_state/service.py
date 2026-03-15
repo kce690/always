@@ -1,9 +1,14 @@
-"""Rule-based life-state service with sparse wake-up and offline catch-up."""
+"""Rule-based life-state service with sparse wake-up and offline catch-up.
+
+Includes deterministic prehistory bootstrap that seeds immutable raw life events
+so long-term memory starts from an event stream (not static backstory text).
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import random
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -11,6 +16,7 @@ from typing import Any
 
 from loguru import logger
 from nanobot.companion.life_state.memory_engine import LifeMemoryEngine
+from nanobot.companion.life_state.prehistory_generator import PrehistoryBootstrapGenerator
 
 
 def _now_local() -> datetime:
@@ -122,6 +128,8 @@ class LifeStateService:
     )
     _MIN_SLEEP_SECONDS = 5
     _MAX_CATCHUP_STEPS = 768
+    _PREHISTORY_META_VERSION = 1
+    _PREHISTORY_CONFIRM_TOKEN = "REGENERATE_PREHISTORY"
 
     def __init__(self, workspace: Path, enabled: bool = True):
         self.workspace = workspace
@@ -129,10 +137,14 @@ class LifeStateService:
         self.state_path = workspace / "LIFESTATE.json"
         self.life_log_path = workspace / "LIFELOG.md"
         self.memory_engine = LifeMemoryEngine(workspace)
+        self.prehistory_generator = PrehistoryBootstrapGenerator(workspace)
+        self.prehistory_meta_path = self.memory_engine.store.memory_index_path.parent / "PREHISTORY_META.json"
         self._running = False
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
         self._rng = random.Random()
+        self._prehistory_checked = False
+        self._prehistory_status: dict[str, Any] | None = None
 
     @staticmethod
     def _default_state(now: datetime) -> dict[str, Any]:
@@ -171,8 +183,12 @@ class LifeStateService:
             except Exception as exc:
                 logger.warning("LifeState: failed to parse {}: {}", self.state_path, exc)
 
+        return self._normalize_state_payload(payload, now=now)
+
+    def _normalize_state_payload(self, payload: dict[str, Any], *, now: datetime) -> dict[str, Any]:
+        """Normalize arbitrary state payload to current schema and value ranges."""
         state = self._default_state(now)
-        state.update(payload)
+        state.update(payload or {})
 
         state["location"] = _coerce_text(state.get("location"), "家")
         state["activity"] = _coerce_text(state.get("activity"), "休息")
@@ -219,6 +235,269 @@ class LifeStateService:
             )
         except Exception as exc:
             logger.error("LifeState: failed to write {}: {}", self.state_path, exc)
+
+    def _load_prehistory_meta(self) -> dict[str, Any]:
+        """Load prehistory metadata if it exists."""
+        if not self.prehistory_meta_path.exists():
+            return {}
+        try:
+            raw = self.prehistory_meta_path.read_text(encoding="utf-8").strip()
+            payload = json.loads(raw) if raw else {}
+            if isinstance(payload, dict):
+                return payload
+        except Exception as exc:
+            logger.warning("LifeState: failed to parse {}: {}", self.prehistory_meta_path, exc)
+        return {}
+
+    def _write_prehistory_meta(self, payload: dict[str, Any]) -> None:
+        """Atomically persist prehistory metadata."""
+        obj = dict(payload or {})
+        obj["version"] = self._PREHISTORY_META_VERSION
+        data = json.dumps(obj, ensure_ascii=False, indent=2) + "\n"
+        self.prehistory_meta_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.prehistory_meta_path.with_suffix(self.prehistory_meta_path.suffix + ".tmp")
+        tmp.write_text(data, encoding="utf-8")
+        os.replace(tmp, self.prehistory_meta_path)
+
+    def _write_life_log_snapshot(self, events: list[dict[str, Any]]) -> None:
+        """Rewrite LIFELOG.md with a bounded recent-event window."""
+        lines = [
+            "# Life Log",
+            "",
+            "This file stores recent life-state events that can inform natural self-status replies.",
+        ]
+        for event in events:
+            summary = _coerce_text(event.get("summary"), "")
+            when = _parse_iso(event.get("time")) or _now_local()
+            if not summary:
+                continue
+            stamp = when.strftime("%Y-%m-%d %H:%M")
+            lines.append(f"- [{stamp}] {summary}")
+        self.life_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.life_log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def _raw_event_count(self) -> int:
+        return sum(1 for _ in self.memory_engine.store.iter_raw_events())
+
+    def _memory_entry_count(self) -> int:
+        payload = self.memory_engine.store.load_memory_index()
+        entries = payload.get("entries")
+        if isinstance(entries, list):
+            return len(entries)
+        return 0
+
+    def _state_has_runtime_history(self) -> bool:
+        """Whether an existing state file already looks like active runtime state."""
+        if not self.state_path.exists():
+            return False
+        try:
+            raw = self.state_path.read_text(encoding="utf-8").strip()
+            payload = json.loads(raw) if raw else {}
+        except Exception:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        last_tick = _parse_iso(payload.get("last_tick")) or _parse_iso(payload.get("last_update"))
+        next_at = _parse_iso(payload.get("next_transition_at"))
+        return last_tick is not None and next_at is not None
+
+    def _build_existing_prehistory_status(self, *, reason: str) -> dict[str, Any]:
+        meta = self._load_prehistory_meta()
+        return {
+            "bootstrapped": False,
+            "reason": reason,
+            "raw_event_count": self._raw_event_count(),
+            "memory_entry_count": self._memory_entry_count(),
+            "seed": meta.get("seed"),
+            "generator_version": meta.get("generator_version"),
+            "generated_at": meta.get("generated_at"),
+            "summary": meta.get("summary") or {},
+        }
+
+    def _apply_bootstrap_result(
+        self,
+        *,
+        result,
+        now: datetime,
+        destructive: bool,
+    ) -> dict[str, Any]:
+        """Persist generated prehistory via raw-events -> rebuild -> decay path."""
+        raw_path = self.memory_engine.store.raw_event_log_path
+        idx_path = self.memory_engine.store.memory_index_path
+
+        if destructive:
+            if raw_path.exists():
+                raw_path.unlink()
+            if idx_path.exists():
+                idx_path.unlink()
+
+        for generated in result.events:
+            self.memory_engine.store.append_raw_event(generated.to_raw_event())
+
+        rebuilt = self.memory_engine.rebuild_from_raw_events()
+        self.memory_engine.decay_to(now)
+
+        state = self._normalize_state_payload(result.final_state, now=now)
+        last_tick = _parse_iso(state.get("last_tick")) or now
+        state["next_transition_at"] = _to_iso(self._compute_next_transition(state, last_tick))
+        self._save_state(state)
+        self._write_life_log_snapshot([x.to_raw_event() for x in result.recent_log_events])
+
+        meta = dict(result.metadata)
+        meta.update(
+            {
+                "generated_at": _to_iso(now),
+                "raw_event_count": len(result.events),
+                "rebuilt_memory_entries": rebuilt,
+            }
+        )
+        self._write_prehistory_meta(meta)
+
+        status = {
+            "bootstrapped": True,
+            "reason": "generated",
+            "seed": result.metadata.get("seed"),
+            "generator_version": result.metadata.get("generator_version"),
+            "generated_at": meta.get("generated_at"),
+            "raw_event_count": len(result.events),
+            "memory_entry_count": rebuilt,
+            "summary": result.summary,
+            "destructive": destructive,
+        }
+        return status
+
+    def _ensure_prehistory_bootstrap_locked(
+        self,
+        *,
+        now: datetime | None = None,
+        force: bool = False,
+        seed: int | None = None,
+        profile_overrides: dict[str, Any] | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Generate and persist prehistory when no prior history exists."""
+        target = (now or _now_local()).replace(microsecond=0)
+        if self._prehistory_checked and not force and not dry_run:
+            return dict(self._prehistory_status or self._build_existing_prehistory_status(reason="already_checked"))
+
+        if not force and not dry_run:
+            raw_count = self._raw_event_count()
+            entry_count = self._memory_entry_count()
+            if raw_count > 0 or entry_count > 0:
+                if raw_count > 0 and entry_count == 0:
+                    self.memory_engine.rebuild_from_raw_events()
+                    self.memory_engine.decay_to(target)
+                status = self._build_existing_prehistory_status(reason="history_exists")
+                self._prehistory_checked = True
+                self._prehistory_status = status
+                return status
+            if self._state_has_runtime_history():
+                status = self._build_existing_prehistory_status(reason="state_history_exists")
+                self._prehistory_checked = True
+                self._prehistory_status = status
+                return status
+
+        profile = self.prehistory_generator.build_profile(overrides=profile_overrides)
+        result = self.prehistory_generator.generate(
+            profile=profile,
+            now=target,
+            seed=seed,
+        )
+
+        if dry_run:
+            return {
+                "bootstrapped": False,
+                "reason": "dry_run",
+                "seed": result.metadata.get("seed"),
+                "generator_version": result.metadata.get("generator_version"),
+                "raw_event_count": len(result.events),
+                "summary": result.summary,
+                "sample_events": [x.to_raw_event() for x in result.events[:5]],
+            }
+
+        status = self._apply_bootstrap_result(
+            result=result,
+            now=target,
+            destructive=bool(force),
+        )
+        self._prehistory_checked = True
+        self._prehistory_status = dict(status)
+        return status
+
+    async def ensure_prehistory_bootstrap(
+        self,
+        *,
+        seed: int | None = None,
+        profile_overrides: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Bootstrap prior-life event history if no compatible history exists."""
+        async with self._lock:
+            return self._ensure_prehistory_bootstrap_locked(
+                now=_now_local(),
+                seed=seed,
+                profile_overrides=profile_overrides,
+            )
+
+    async def preview_prehistory(
+        self,
+        *,
+        seed: int | None = None,
+        profile_overrides: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Dry-run prehistory generation without touching persisted state."""
+        async with self._lock:
+            return self._ensure_prehistory_bootstrap_locked(
+                now=_now_local(),
+                force=True,
+                seed=seed,
+                profile_overrides=profile_overrides,
+                dry_run=True,
+            )
+
+    async def get_prehistory_metadata(self) -> dict[str, Any]:
+        """Read persisted prehistory metadata and current counters."""
+        async with self._lock:
+            meta = self._load_prehistory_meta()
+            meta["raw_event_count"] = self._raw_event_count()
+            meta["memory_entry_count"] = self._memory_entry_count()
+            return meta
+
+    async def get_prehistory_summary(self) -> dict[str, Any]:
+        """Return safe summary for diagnostics and audits."""
+        async with self._lock:
+            meta = self._load_prehistory_meta()
+            return {
+                "bootstrapped": self._raw_event_count() > 0,
+                "seed": meta.get("seed"),
+                "generator_version": meta.get("generator_version"),
+                "generated_at": meta.get("generated_at"),
+                "raw_event_count": self._raw_event_count(),
+                "memory_entry_count": self._memory_entry_count(),
+                "summary": meta.get("summary") or {},
+                "profile": meta.get("profile") or {},
+            }
+
+    async def regenerate_prehistory(
+        self,
+        *,
+        confirm_token: str | None = None,
+        seed: int | None = None,
+        profile_overrides: dict[str, Any] | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Explicitly regenerate prehistory (destructive unless dry-run)."""
+        if not dry_run and str(confirm_token or "").strip() != self._PREHISTORY_CONFIRM_TOKEN:
+            raise ValueError(
+                "Refusing destructive prehistory regeneration without explicit confirm token."
+            )
+        async with self._lock:
+            return self._ensure_prehistory_bootstrap_locked(
+                now=_now_local(),
+                force=True,
+                seed=seed,
+                profile_overrides=profile_overrides,
+                dry_run=dry_run,
+            )
 
     def _slot_at(self, now: datetime) -> tuple[str, int]:
         """Return current schedule slot and end minute-of-day."""
@@ -473,6 +752,7 @@ class LifeStateService:
     async def get_state(self) -> dict[str, Any]:
         """Return normalized current state snapshot."""
         async with self._lock:
+            self._ensure_prehistory_bootstrap_locked(now=_now_local())
             return self._load_state()
 
     async def get_recent_events(self, limit: int = 3) -> list[str]:
@@ -515,6 +795,7 @@ class LifeStateService:
             return {"recall_level": "none", "evidence": [], "prompt_block": ""}
         async with self._lock:
             now = _now_local()
+            self._ensure_prehistory_bootstrap_locked(now=now)
             self.memory_engine.decay_to(now)
             return self.memory_engine.build_prompt_evidence(ask, now=now, limit=limit)
 
@@ -535,6 +816,7 @@ class LifeStateService:
         """Offline catch-up state transitions until now. Returns step count."""
         now = (now or _now_local()).replace(microsecond=0)
         async with self._lock:
+            self._ensure_prehistory_bootstrap_locked(now=now)
             state = self._load_state(now)
             steps = 0
             events: list[dict[str, Any]] = []
@@ -565,6 +847,7 @@ class LifeStateService:
         """Advance state once at `now` and persist."""
         at = (now or _now_local()).replace(microsecond=0)
         async with self._lock:
+            self._ensure_prehistory_bootstrap_locked(now=at)
             current = self._load_state(at)
             updated, event = self._advance_once(current, at, source=source)
             self._save_state(updated)
@@ -587,6 +870,7 @@ class LifeStateService:
         now = _now_local()
         until = now + timedelta(minutes=duration_minutes)
         async with self._lock:
+            self._ensure_prehistory_bootstrap_locked(now=now)
             state = self._load_state(now)
             if activity is not None:
                 state["override_activity"] = _coerce_text(activity, "") or None
@@ -628,6 +912,7 @@ class LifeStateService:
         """Clear override fields immediately."""
         now = _now_local()
         async with self._lock:
+            self._ensure_prehistory_bootstrap_locked(now=now)
             state = self._load_state(now)
             state["override_until"] = None
             state["override_reason"] = None
@@ -649,6 +934,8 @@ class LifeStateService:
         if self._running:
             logger.warning("LifeState: already running")
             return
+        async with self._lock:
+            self._ensure_prehistory_bootstrap_locked(now=_now_local())
         self._running = True
         self._task = asyncio.create_task(self._run_loop())
         logger.info("LifeState: service started")

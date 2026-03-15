@@ -134,3 +134,89 @@ class LifeStateSetOverrideTool(Tool):
         }
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
+
+class LifeStatePrehistoryInfoTool(Tool):
+    """Inspect deterministic prehistory bootstrap metadata."""
+
+    def __init__(self, service: LifeStateService):
+        self._service = service
+
+    @property
+    def name(self) -> str:
+        return "life_state_prehistory_info"
+
+    @property
+    def description(self) -> str:
+        return "Read prehistory bootstrap seed/version/summary and event counts."
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        }
+
+    async def execute(self, **kwargs: Any) -> str:
+        payload = await self._service.get_prehistory_summary()
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+class LifeStatePrehistoryRegenerateTool(Tool):
+    """Explicitly regenerate prehistory with destructive guardrails."""
+
+    def __init__(self, service: LifeStateService):
+        self._service = service
+
+    @property
+    def name(self) -> str:
+        return "life_state_prehistory_regenerate"
+
+    @property
+    def description(self) -> str:
+        return "Dry-run or explicitly regenerate prehistory. Destructive regeneration requires confirm token."
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "Preview generated prehistory without writing files.",
+                },
+                "confirm_token": {
+                    "type": "string",
+                    "description": "Required for destructive regenerate. Must be REGENERATE_PREHISTORY.",
+                },
+                "seed": {
+                    "type": "integer",
+                    "description": "Optional deterministic seed override.",
+                },
+                "profile_overrides": {
+                    "type": "object",
+                    "description": "Optional structured profile overrides for generation.",
+                },
+            },
+            "required": [],
+        }
+
+    async def execute(
+        self,
+        dry_run: bool = True,
+        confirm_token: str | None = None,
+        seed: int | None = None,
+        profile_overrides: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> str:
+        try:
+            payload = await self._service.regenerate_prehistory(
+                confirm_token=confirm_token,
+                seed=seed,
+                profile_overrides=profile_overrides,
+                dry_run=dry_run,
+            )
+            payload["ok"] = True
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        except ValueError as exc:
+            return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2)
