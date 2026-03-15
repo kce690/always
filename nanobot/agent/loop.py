@@ -528,6 +528,7 @@ class AgentLoop:
         answer_slot: str = "unknown",
         recent_events: list[str] | None = None,
         has_recent_event: bool,
+        memory_recall_level: str = "none",
     ) -> str | None:
         """Remove unsupported concrete life details when evidence is weak."""
         if not reply:
@@ -536,12 +537,20 @@ class AgentLoop:
         has_meal_event = any(re.search(r"(吃|饭|午饭|晚饭|早饭|早餐)", str(item or "")) for item in events)
 
         if answer_slot == "meal" and not has_meal_event:
+            if memory_recall_level == "none":
+                return "就普通吃的"
+            if memory_recall_level == "gist":
+                return "记得大概吃过"
             text = re.sub(r"\s+", " ", reply).strip()
             text = re.sub(r"(刚刚?|刚才)?(在)?(外面|家里|学校)?(随便|简单)?吃了[^，。！？!?]{0,24}", "", text).strip(" ，,。！？!?")
             text = re.sub(r"(午饭|晚饭|早饭|早餐)吃了[^，。！？!?]{0,24}", "", text).strip(" ，,。！？!?")
             return text or "就普通吃的"
 
         if answer_slot == "previous_activity" and not has_recent_event:
+            if memory_recall_level == "none":
+                return "有点记不清了"
+            if memory_recall_level == "gist":
+                return "只记得个大概"
             text = re.sub(r"\s+", " ", reply).strip()
             text = re.sub(r"(刚刚?|刚才|之前)[^，。！？!?]{0,24}", "", text).strip(" ，,。！？!?")
             return text or "刚刚就那样"
@@ -626,12 +635,39 @@ class AgentLoop:
             return "还在忙呢"
         return "这会儿能聊"
 
+    @staticmethod
+    def _pick_memory_evidence(
+        evidence: list[dict[str, Any]] | None,
+        *,
+        recall_level: str | None = None,
+        keyword: str | None = None,
+    ) -> dict[str, Any] | None:
+        if not evidence:
+            return None
+        for item in evidence:
+            if recall_level and str(item.get("recall_level")) != recall_level:
+                continue
+            text = str(item.get("text") or item.get("gist_summary") or "")
+            if keyword and keyword not in text:
+                continue
+            return item
+        return None
+
+    @staticmethod
+    def _compact_memory_reply(text: str, *, max_chars: int = 12) -> str:
+        compact = re.sub(r"\s+", "", text or "")
+        if not compact:
+            return ""
+        return compact[:max_chars] if len(compact) > max_chars else compact
+
     def _build_slot_floor_reply(
         self,
         answer_slot: str,
         user_text: str,
         snapshot: dict[str, Any],
         recent_events: list[str],
+        memory_evidence: list[dict[str, Any]] | None = None,
+        memory_recall_level: str = "none",
     ) -> str | None:
         """Build evidence-grounded floor reply for each answer slot."""
         if answer_slot == "greeting":
@@ -650,6 +686,19 @@ class AgentLoop:
                 if len(compact) > 12:
                     return compact[:12]
                 return compact
+            detail = self._pick_memory_evidence(memory_evidence, recall_level="detail")
+            if detail:
+                text = self._compact_memory_reply(str(detail.get("text") or ""))
+                if text:
+                    return text
+            if memory_recall_level == "gist":
+                gist = self._pick_memory_evidence(memory_evidence, recall_level="gist")
+                if gist:
+                    text = self._compact_memory_reply(str(gist.get("gist_summary") or gist.get("text") or ""))
+                    if text:
+                        return f"大概是{text}"
+            if memory_recall_level == "none":
+                return "有点记不清了"
             return "刚刚就那样"
 
         if answer_slot == "meal":
@@ -659,6 +708,13 @@ class AgentLoop:
                 if len(compact) > 12:
                     return compact[:12]
                 return compact
+            detail_meal = self._pick_memory_evidence(memory_evidence, recall_level="detail", keyword="吃")
+            if detail_meal:
+                text = self._compact_memory_reply(str(detail_meal.get("text") or ""))
+                if text:
+                    return text
+            if memory_recall_level == "gist":
+                return "记得大概吃过"
             return "就普通吃的"
 
         if answer_slot == "mood":
@@ -1092,6 +1148,7 @@ class AgentLoop:
         answer_slot: str = "unknown",
         recent_events: list[str] | None = None,
         has_recent_event: bool,
+        memory_recall_level: str = "none",
         state_floor_reply: str | None = None,
         intent_probe_floor_reply: str | None = None,
         low_info_floor_reply: str | None = None,
@@ -1131,6 +1188,7 @@ class AgentLoop:
             answer_slot=answer_slot,
             recent_events=recent_events,
             has_recent_event=has_recent_event,
+            memory_recall_level=memory_recall_level,
         ) or text
 
         budget = cls._reply_budget(category)
@@ -1336,6 +1394,49 @@ class AgentLoop:
             "availability",
             "meta_self",
         }
+
+    @staticmethod
+    def _memory_prompt_message(memory_payload: dict[str, Any] | None) -> str | None:
+        """Return system-prompt memory evidence block for this turn."""
+        if not isinstance(memory_payload, dict):
+            return None
+        block = str(memory_payload.get("prompt_block") or "").strip()
+        return block or None
+
+    @staticmethod
+    def _memory_recall_level(memory_payload: dict[str, Any] | None) -> str:
+        """Normalize memory recall level for evidence gating."""
+        if not isinstance(memory_payload, dict):
+            return "none"
+        level = str(memory_payload.get("recall_level") or "none").strip().lower()
+        return level if level in {"detail", "gist", "none"} else "none"
+
+    @staticmethod
+    def _memory_evidence_items(memory_payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+        """Normalize evidence list from memory payload."""
+        if not isinstance(memory_payload, dict):
+            return []
+        items = memory_payload.get("evidence")
+        if not isinstance(items, list):
+            return []
+        return [x for x in items if isinstance(x, dict)]
+
+    def _memory_ids_for_turn(
+        self,
+        *,
+        memory_payload: dict[str, Any] | None,
+        answer_slot: str,
+    ) -> list[str]:
+        """Pick memory ids that actually entered this turn's evidence set."""
+        items = self._memory_evidence_items(memory_payload)
+        if not items:
+            return []
+        if answer_slot == "meal":
+            scoped = [x for x in items if "吃" in str(x.get("text") or x.get("gist_summary") or "")]
+            items = scoped or items
+        if answer_slot == "previous_activity":
+            items = items[:3]
+        return [str(x.get("id")) for x in items if str(x.get("id") or "").strip()]
 
     async def _run_agent_loop(
         self,
@@ -1588,6 +1689,29 @@ class AgentLoop:
         state_snapshot = self.context.get_life_state_snapshot()
         recent_events = self.context.get_recent_life_events(limit=5)
         has_recent_event = bool(recent_events)
+        memory_payload: dict[str, Any] | None = None
+        if self.life_state_service:
+            query_with_context = " | ".join(
+                part for part in [
+                    msg.content,
+                    str(state_snapshot.get("activity") or ""),
+                    " ".join(recent_events[:2]),
+                ] if part
+            )
+            try:
+                memory_payload = await self.life_state_service.retrieve_memory_evidence(
+                    query_with_context,
+                    limit=6,
+                )
+            except Exception:
+                logger.exception("Memory retrieval failed for {}", key)
+                memory_payload = None
+        memory_evidence = self._memory_evidence_items(memory_payload)
+        memory_recall_level = self._memory_recall_level(memory_payload)
+        memory_ids_for_turn = self._memory_ids_for_turn(
+            memory_payload=memory_payload,
+            answer_slot=answer_slot,
+        )
         state_floor_reply = self._build_state_floor_reply() if category == "state" else None
         intent_probe_floor_reply = self._build_intent_probe_reply(msg.content) if category == "intent_probe" else None
         low_info_floor_reply = (
@@ -1605,6 +1729,8 @@ class AgentLoop:
             msg.content,
             state_snapshot,
             recent_events,
+            memory_evidence,
+            memory_recall_level,
         )
 
         # Slot-first, rule-first: explicit slots bypass free LLM generation by default.
@@ -1630,6 +1756,11 @@ class AgentLoop:
             session.messages.append({"role": "assistant", "content": final_content, "timestamp": datetime.now().isoformat()})
             session.updated_at = datetime.now()
             self._record_reply_signature(key, answer_slot, final_content)
+            if self.life_state_service and memory_ids_for_turn:
+                try:
+                    await self.life_state_service.reinforce_memory_evidence(memory_ids_for_turn)
+                except Exception:
+                    logger.exception("Memory reinforcement failed for {}", key)
             self.sessions.save(session)
             await self.memory_consolidator.maybe_consolidate_by_tokens(session)
             preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
@@ -1651,6 +1782,9 @@ class AgentLoop:
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
         )
+        memory_prompt = self._memory_prompt_message(memory_payload)
+        if memory_prompt:
+            initial_messages.insert(-1, {"role": "system", "content": memory_prompt})
         if low_info_strategy:
             initial_messages.insert(
                 -1,
@@ -1684,6 +1818,7 @@ class AgentLoop:
             answer_slot=answer_slot,
             recent_events=recent_events,
             has_recent_event=has_recent_event,
+            memory_recall_level=memory_recall_level,
             state_floor_reply=state_floor_reply,
             intent_probe_floor_reply=intent_probe_floor_reply,
             low_info_floor_reply=low_info_floor_reply,
@@ -1746,6 +1881,11 @@ class AgentLoop:
         self._replace_last_assistant_content(all_msgs, final_content)
         self._save_turn(session, all_msgs, 1 + len(history))
         self._record_reply_signature(key, answer_slot, final_content)
+        if self.life_state_service and memory_ids_for_turn:
+            try:
+                await self.life_state_service.reinforce_memory_evidence(memory_ids_for_turn)
+            except Exception:
+                logger.exception("Memory reinforcement failed for {}", key)
         self.sessions.save(session)
         await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 

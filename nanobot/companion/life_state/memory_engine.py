@@ -1,0 +1,267 @@
+"""Life-memory orchestration: ingest, decay, retrieve, reinforce, rebuild."""
+
+from __future__ import annotations
+
+import threading
+from datetime import datetime
+from typing import Any
+
+from nanobot.companion.life_state.memory_config import MemoryForgettingConfig
+from nanobot.companion.life_state.memory_decay import decay_entry, reinforce_entry
+from nanobot.companion.life_state.memory_interference import (
+    estimate_cluster_pressure,
+    recompute_cluster_pressure,
+)
+from nanobot.companion.life_state.memory_models import MemoryEntry, MemoryEvidence
+from nanobot.companion.life_state.memory_retrieval import retrieve_memories
+from nanobot.companion.life_state.memory_scoring import score_event
+from nanobot.companion.life_state.memory_store import LifeMemoryStore
+from nanobot.companion.life_state.memory_utils import now_local, parse_iso, to_iso
+
+
+class LifeMemoryEngine:
+    """Stateful engine implementing dual-track forgetting architecture."""
+
+    def __init__(
+        self,
+        workspace,
+        *,
+        config: MemoryForgettingConfig | None = None,
+        store: LifeMemoryStore | None = None,
+    ):
+        self.workspace = workspace
+        self.config = config or MemoryForgettingConfig.from_workspace(workspace)
+        self.store = store or LifeMemoryStore(workspace)
+        self._lock = threading.RLock()
+
+    def ingest_event(self, event: dict[str, Any]) -> MemoryEntry | None:
+        """Append raw event and index it as a retrievable memory entry."""
+        summary = str(event.get("summary") or "").strip()
+        if not summary:
+            return None
+
+        with self._lock:
+            raw = self.store.append_raw_event(event)
+            event_time = parse_iso(raw.get("time")) or now_local()
+
+            entries = self._load_entries()
+            changed = False
+            for entry in entries:
+                changed = decay_entry(entry, now=event_time, cfg=self.config) or changed
+            recompute_cluster_pressure(entries, now=event_time, cfg=self.config)
+
+            bootstrap = score_event(raw, self.config, cluster_pressure=0.0)
+            pressure = estimate_cluster_pressure(
+                entries,
+                cluster_id=bootstrap["similarity_cluster_id"],
+                now=event_time,
+                cfg=self.config,
+            )
+            scored = score_event(raw, self.config, cluster_pressure=pressure)
+
+            event_id = str(raw.get("event_id") or raw.get("id") or "")
+            entry = MemoryEntry(
+                id=f"mem_{event_id}",
+                event_ids=[event_id] if event_id else [],
+                timestamp_first=to_iso(event_time),
+                timestamp_last=to_iso(event_time),
+                memory_type=scored["memory_type"],
+                gist_summary=scored["gist_summary"],
+                detail_text=scored["detail_text"],
+                importance=scored["importance"],
+                salience=scored["salience"],
+                self_relevance=scored["self_relevance"],
+                relationship_relevance=scored["relationship_relevance"],
+                emotional_weight=scored["emotional_weight"],
+                novelty=scored["novelty"],
+                source_confidence=scored["source_confidence"],
+                retrieval_count=0,
+                similarity_cluster_id=scored["similarity_cluster_id"],
+                similarity_cluster_pressure=scored["similarity_cluster_pressure"],
+                pinned_flag=scored["pinned_flag"],
+                permanence_tier=scored["permanence_tier"],
+                detail_strength=scored["detail_strength"],
+                gist_strength=scored["gist_strength"],
+                detail_strength_base=scored["detail_strength_base"],
+                gist_strength_base=scored["gist_strength_base"],
+                last_recalled_at=None,
+                last_decay_at=to_iso(event_time),
+            )
+            entries.append(entry)
+            recompute_cluster_pressure(entries, now=event_time, cfg=self.config)
+            self._save_entries(entries)
+            return entry
+
+    def decay_to(self, now: datetime | None = None) -> int:
+        """Decay all memory strengths forward to target time."""
+        target = now or now_local()
+        with self._lock:
+            entries = self._load_entries()
+            changed = 0
+            for entry in entries:
+                if decay_entry(entry, now=target, cfg=self.config):
+                    changed += 1
+            if changed:
+                recompute_cluster_pressure(entries, now=target, cfg=self.config)
+                self._save_entries(entries)
+            return changed
+
+    def retrieve(
+        self,
+        query: str,
+        *,
+        now: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[MemoryEvidence]:
+        """Retrieve currently recallable memories for a query."""
+        target = now or now_local()
+        with self._lock:
+            entries = self._load_entries()
+            changed = False
+            for entry in entries:
+                changed = decay_entry(entry, now=target, cfg=self.config) or changed
+            recompute_cluster_pressure(entries, now=target, cfg=self.config)
+            if changed:
+                self._save_entries(entries)
+            return retrieve_memories(
+                entries,
+                query=query,
+                now=target,
+                cfg=self.config,
+                limit=limit,
+            )
+
+    def reinforce(self, memory_ids: list[str], *, now: datetime | None = None) -> int:
+        """Apply retrieval-based strengthening to used memory entries."""
+        if not memory_ids:
+            return 0
+        target = now or now_local()
+        id_set = {str(x) for x in memory_ids if str(x)}
+        with self._lock:
+            entries = self._load_entries()
+            reinforced = 0
+            for entry in entries:
+                if entry.id not in id_set:
+                    continue
+                reinforce_entry(entry, now=target, cfg=self.config)
+                reinforced += 1
+            if reinforced:
+                recompute_cluster_pressure(entries, now=target, cfg=self.config)
+                self._save_entries(entries)
+            return reinforced
+
+    def rebuild_from_raw_events(self) -> int:
+        """Rebuild memory index deterministically from immutable raw event log."""
+        with self._lock:
+            raw_events = list(self.store.iter_raw_events())
+            raw_events.sort(key=lambda e: str(e.get("time") or ""))
+            entries: list[MemoryEntry] = []
+
+            for raw in raw_events:
+                summary = str(raw.get("summary") or "").strip()
+                if not summary:
+                    continue
+                event_time = parse_iso(raw.get("time")) or now_local()
+
+                for existing in entries:
+                    decay_entry(existing, now=event_time, cfg=self.config)
+                recompute_cluster_pressure(entries, now=event_time, cfg=self.config)
+
+                bootstrap = score_event(raw, self.config, cluster_pressure=0.0)
+                pressure = estimate_cluster_pressure(
+                    entries,
+                    cluster_id=bootstrap["similarity_cluster_id"],
+                    now=event_time,
+                    cfg=self.config,
+                )
+                scored = score_event(raw, self.config, cluster_pressure=pressure)
+                event_id = str(raw.get("event_id") or raw.get("id") or "")
+                entries.append(
+                    MemoryEntry(
+                        id=f"mem_{event_id}",
+                        event_ids=[event_id] if event_id else [],
+                        timestamp_first=to_iso(event_time),
+                        timestamp_last=to_iso(event_time),
+                        memory_type=scored["memory_type"],
+                        gist_summary=scored["gist_summary"],
+                        detail_text=scored["detail_text"],
+                        importance=scored["importance"],
+                        salience=scored["salience"],
+                        self_relevance=scored["self_relevance"],
+                        relationship_relevance=scored["relationship_relevance"],
+                        emotional_weight=scored["emotional_weight"],
+                        novelty=scored["novelty"],
+                        source_confidence=scored["source_confidence"],
+                        retrieval_count=0,
+                        similarity_cluster_id=scored["similarity_cluster_id"],
+                        similarity_cluster_pressure=scored["similarity_cluster_pressure"],
+                        pinned_flag=scored["pinned_flag"],
+                        permanence_tier=scored["permanence_tier"],
+                        detail_strength=scored["detail_strength"],
+                        gist_strength=scored["gist_strength"],
+                        detail_strength_base=scored["detail_strength_base"],
+                        gist_strength_base=scored["gist_strength_base"],
+                        last_recalled_at=None,
+                        last_decay_at=to_iso(event_time),
+                    )
+                )
+                recompute_cluster_pressure(entries, now=event_time, cfg=self.config)
+
+            self._save_entries(entries)
+            return len(entries)
+
+    def build_prompt_evidence(
+        self,
+        query: str,
+        *,
+        now: datetime | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Retrieve memories and format a prompt-safe evidence block."""
+        evidence = self.retrieve(query, now=now, limit=limit)
+        detail = [e for e in evidence if e.recall_level == "detail"]
+        gist = [e for e in evidence if e.recall_level == "gist"]
+
+        lines = [
+            "Memory retrieval policy:",
+            "- DETAIL evidence may be stated with specifics.",
+            "- GIST evidence is coarse only; do not invent missing details.",
+            "- If no evidence is strong enough, say memory is unclear.",
+        ]
+        if detail:
+            lines.append("DETAIL evidence:")
+            for item in detail[:4]:
+                lines.append(f"- [{item.id}] {item.text}")
+        if gist:
+            lines.append("GIST_ONLY evidence:")
+            for item in gist[:4]:
+                lines.append(f"- [{item.id}] {item.gist_summary}")
+        if not detail and not gist:
+            lines.append("No reliable long-term memory evidence for this query.")
+
+        recall_level = "detail" if detail else ("gist" if gist else "none")
+        return {
+            "recall_level": recall_level,
+            "evidence": [item.to_dict() for item in evidence],
+            "prompt_block": "\n".join(lines),
+        }
+
+    def _load_entries(self) -> list[MemoryEntry]:
+        payload = self.store.load_memory_index()
+        entries_raw = payload.get("entries") or []
+        out: list[MemoryEntry] = []
+        for item in entries_raw:
+            if isinstance(item, dict):
+                entry = MemoryEntry.from_dict(item)
+                if entry.id:
+                    out.append(entry)
+        return out
+
+    def _save_entries(self, entries: list[MemoryEntry]) -> None:
+        self.store.save_memory_index(
+            {
+                "entries": [entry.to_dict() for entry in entries],
+                "entry_count": len(entries),
+            }
+        )
+

@@ -1,0 +1,74 @@
+{
+  "scoring": {
+    "importance": 0.24,
+    "self_relevance": 0.16,
+    "relationship_relevance": 0.14,
+    "emotional_weight": 0.16,
+    "novelty": 0.15,
+    "source_confidence": 0.15
+  },
+  "strength": {
+    "alpha_detail": 0.72,
+    "alpha_gist": 0.9,
+    "max_strength": 1.0
+  },
+  "decay": {
+    "lambda_detail": 0.045,
+    "lambda_gist": 0.018,
+    "salience_shield": 0.7,
+    "emotional_shield": 0.65,
+    "relationship_shield": 0.5,
+    "self_relevance_shield": 0.3,
+    "retrieval_shield": 0.22,
+    "min_protection": 0.3
+  },
+  "retrieval": {
+    "T_detail": 0.42,
+    "T_gist": 0.24,
+    "min_relevance": 0.08,
+    "max_results": 6
+  },
+  "reinforcement": {
+    "r_detail": 0.24,
+    "r_gist": 0.12,
+    "k_detail": 0.28,
+    "k_gist": 0.2
+  },
+  "interference": {
+    "gamma_detail": 0.85,
+    "gamma_gist": 0.25,
+    "cluster_half_life_hours": 72.0,
+    "routine_pressure_boost": 0.35
+  },
+  "permanence": {
+    "pinned_detail_floor": 0.52,
+    "pinned_gist_floor": 0.7,
+    "tier_decay_multipliers": {
+      "pinned": 0.15,
+      "durable": 0.45,
+      "normal": 1.0,
+      "volatile": 1.8
+    },
+    "tier_min_floors": {
+      "pinned": {
+        "detail": 0.52,
+        "gist": 0.7
+      },
+      "durable": {
+        "detail": 0.12,
+        "gist": 0.2
+      },
+      "normal": {
+        "detail": 0.0,
+        "gist": 0.0
+      },
+      "volatile": {
+        "detail": 0.0,
+        "gist": 0.0
+      }
+    },
+    "pinned_salience_threshold": 0.82,
+    "durable_salience_threshold": 0.68,
+    "volatile_salience_threshold": 0.32
+  }
+}

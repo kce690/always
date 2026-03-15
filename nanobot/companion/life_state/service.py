@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from loguru import logger
+from nanobot.companion.life_state.memory_engine import LifeMemoryEngine
 
 
 def _now_local() -> datetime:
@@ -127,6 +128,7 @@ class LifeStateService:
         self.enabled = enabled
         self.state_path = workspace / "LIFESTATE.json"
         self.life_log_path = workspace / "LIFELOG.md"
+        self.memory_engine = LifeMemoryEngine(workspace)
         self._running = False
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
@@ -382,7 +384,7 @@ class LifeStateService:
         }
 
     def _append_event(self, event: dict[str, Any]) -> None:
-        """Append event to LIFELOG.md in compact markdown."""
+        """Append event to LIFELOG.md and ingest immutable raw memory event."""
         summary = _coerce_text(event.get("summary"), "")
         when = _parse_iso(event.get("time")) or _now_local()
         if not summary:
@@ -399,6 +401,14 @@ class LifeStateService:
                 fp.write(line)
         except Exception as exc:
             logger.warning("LifeState: failed to append life event: {}", exc)
+
+        # Keep immutable raw events and derived memory index separate from markdown log.
+        try:
+            payload = dict(event)
+            payload.setdefault("time", _to_iso(when))
+            self.memory_engine.ingest_event(payload)
+        except Exception as exc:
+            logger.warning("LifeState: failed to ingest memory event: {}", exc)
 
     def _advance_once(
         self,
@@ -498,6 +508,29 @@ class LifeStateService:
                 break
         return events
 
+    async def retrieve_memory_evidence(self, query: str, limit: int = 6) -> dict[str, Any]:
+        """Retrieve detail/gist-gated memory evidence for current query."""
+        ask = str(query or "").strip()
+        if not ask:
+            return {"recall_level": "none", "evidence": [], "prompt_block": ""}
+        async with self._lock:
+            now = _now_local()
+            self.memory_engine.decay_to(now)
+            return self.memory_engine.build_prompt_evidence(ask, now=now, limit=limit)
+
+    async def reinforce_memory_evidence(self, memory_ids: list[str]) -> int:
+        """Reinforce memories that entered the final evidence set."""
+        ids = [str(x) for x in memory_ids if str(x).strip()]
+        if not ids:
+            return 0
+        async with self._lock:
+            return self.memory_engine.reinforce(ids, now=_now_local())
+
+    async def rebuild_memory_index(self) -> int:
+        """Rebuild memory index from immutable raw life events."""
+        async with self._lock:
+            return self.memory_engine.rebuild_from_raw_events()
+
     async def fast_forward_to(self, now: datetime | None = None) -> int:
         """Offline catch-up state transitions until now. Returns step count."""
         now = (now or _now_local()).replace(microsecond=0)
@@ -519,6 +552,7 @@ class LifeStateService:
             self._save_state(state)
             for item in events:
                 self._append_event(item)
+            self.memory_engine.decay_to(now)
             if steps:
                 logger.info("LifeState: offline catch-up advanced {} step(s)", steps)
             return steps
@@ -536,6 +570,7 @@ class LifeStateService:
             self._save_state(updated)
             if event:
                 self._append_event(event)
+            self.memory_engine.decay_to(at)
             return updated
 
     async def set_override(
@@ -586,6 +621,7 @@ class LifeStateService:
                         "importance": 2,
                     }
                 )
+            self.memory_engine.decay_to(now)
             return state
 
     async def clear_override(self) -> dict[str, Any]:
@@ -602,6 +638,7 @@ class LifeStateService:
             state["last_update"] = _to_iso(now)
             state["next_transition_at"] = _to_iso(self._compute_next_transition(state, now))
             self._save_state(state)
+            self.memory_engine.decay_to(now)
             return state
 
     async def start(self) -> None:
@@ -641,4 +678,3 @@ class LifeStateService:
             except Exception as exc:
                 logger.error("LifeState loop error: {}", exc)
                 await asyncio.sleep(15)
-
