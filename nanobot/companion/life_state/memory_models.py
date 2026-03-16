@@ -37,6 +37,7 @@ class MemoryEntry:
     pinned_flag: bool = False
     permanence_tier: str = "normal"
     decay_profile: str = "default"
+    coarse_type: str = "default"
     detail_strength: float = 0.0
     gist_strength: float = 0.0
     detail_strength_base: float = 0.0
@@ -80,6 +81,9 @@ class MemoryEntry:
             pinned_flag=bool(data.get("pinned_flag") or False),
             permanence_tier=str(data.get("permanence_tier") or "normal"),
             decay_profile=str(data.get("decay_profile") or "default"),
+            coarse_type=_coerce_coarse_type(
+                data.get("coarse_type") or data.get("recalled_kind") or data.get("decay_profile")
+            ),
             detail_strength=float(data.get("detail_strength") or 0.0),
             gist_strength=float(data.get("gist_strength") or 0.0),
             detail_strength_base=float(data.get("detail_strength_base") or data.get("detail_strength") or 0.0),
@@ -106,6 +110,14 @@ class MemoryEvidence:
     similarity_cluster_pressure: float
     permanence_tier: str
     pinned_flag: bool
+    coarse_type: str = "default"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _coerce_coarse_type(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"meal", "study", "relationship"}:
+        return text
+    return "default"

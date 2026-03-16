@@ -894,7 +894,9 @@ class AgentLoop:
         for item in evidence:
             if recall_level and str(item.get("recall_level")) != recall_level:
                 continue
-            text = str(item.get("text") or item.get("gist_summary") or "")
+            text = str(item.get("text") or "")
+            if not text and str(item.get("recall_level") or "") == "detail":
+                text = str(item.get("gist_summary") or "")
             if keyword and keyword not in text:
                 continue
             return item
@@ -954,7 +956,7 @@ class AgentLoop:
             if memory_recall_level == "gist":
                 gist = self._pick_memory_evidence(memory_evidence, recall_level="gist")
                 if gist:
-                    text = self._compact_memory_reply(str(gist.get("gist_summary") or gist.get("text") or ""))
+                    text = self._compact_memory_reply(str(gist.get("text") or ""))
                     if text:
                         return f"大概是{text}"
             if memory_recall_level == "trace":
@@ -1708,7 +1710,10 @@ class AgentLoop:
         if not items:
             return []
         if answer_slot == "meal":
-            scoped = [x for x in items if "吃" in str(x.get("text") or x.get("gist_summary") or "")]
+            scoped = [
+                x for x in items
+                if "吃" in str(x.get("text") or "") or str(x.get("coarse_type") or "") == "meal"
+            ]
             items = scoped or items
         if answer_slot == "previous_activity":
             items = items[:3]

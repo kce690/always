@@ -89,12 +89,12 @@ def _infer_recalled_event_time(summary: str, *, mentioned_at: datetime) -> datet
 
 
 def _infer_recalled_decay_profile(summary: str) -> tuple[str, str]:
-    """Infer coarse remembered-event profile for time-window gating."""
+    """Infer (decay_profile, coarse_type) for remembered events."""
     text = str(summary or "").strip().lower()
     if not text:
         return "default", "default"
     if re.search(r"(identity|promise|milestone|anchor|身份|承诺|里程碑|锚点)", text):
-        return "anchor", "anchor"
+        return "anchor", "default"
     if re.search(r"(relationship|friend|family|partner|关系|朋友|家人|恋人)", text):
         return "relationship", "relationship"
     if re.search(r"(meal|lunch|dinner|breakfast|吃|饭|早餐|午饭|晚饭)", text):
@@ -102,6 +102,20 @@ def _infer_recalled_decay_profile(summary: str) -> tuple[str, str]:
     if re.search(r"(study|class|course|exam|学习|上课|复习|考试)", text):
         return "study", "study"
     return "default", "default"
+
+
+def _coarse_recall_summaries(*, decay_profile: str, coarse_type: str) -> tuple[str, str]:
+    """Return independent coarse gist/trace summaries for recalled events."""
+    if coarse_type == "meal" or decay_profile == "meal":
+        return "Had a meal in that period.", "Had a meal around that time."
+    if coarse_type == "study" or decay_profile == "study":
+        return "Was occupied with study/work tasks.", "Spent time on study-related activities."
+    if coarse_type == "relationship" or decay_profile == "relationship":
+        return "Had relationship-relevant interactions.", "Had a relationship-relevant interaction."
+    if decay_profile == "anchor":
+        text = "A long-term core milestone was involved."
+        return text, text
+    return "A past event happened in that period.", "A past event happened in that period."
 
 
 def _clamp_int(value: Any, low: int, high: int, default: int) -> int:
@@ -885,15 +899,22 @@ class LifeStateService:
             end_dt = start_dt
 
         conf = max(0.0, min(1.0, float(certainty)))
-        decay_profile, recalled_kind = _infer_recalled_decay_profile(text)
-        event_type = "recalled_event" if recalled_kind == "default" else f"recalled_{recalled_kind}"
+        decay_profile, coarse_type = _infer_recalled_decay_profile(text)
+        gist_summary, trace_summary = _coarse_recall_summaries(
+            decay_profile=decay_profile,
+            coarse_type=coarse_type,
+        )
+        event_type = "recalled_event" if coarse_type == "default" else f"recalled_{coarse_type}"
         payload = {
             "type": event_type,
             "summary": text,
             "source": "dialog",
             "source_kind": "dialog_recall",
-            "recalled_kind": recalled_kind,
+            "recalled_kind": coarse_type,
+            "coarse_type": coarse_type,
             "decay_profile": decay_profile,
+            "gist": gist_summary,
+            "trace_summary": trace_summary,
             "source_turn": str(source_turn or ""),
             "time": _to_iso(start_dt),  # Backward compatibility for old readers.
             "event_time_start": _to_iso(start_dt),

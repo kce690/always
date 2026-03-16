@@ -70,9 +70,10 @@ class LifeMemoryEngine:
                 scored_memory_type=scored["memory_type"],
                 pinned_flag=bool(scored["pinned_flag"]),
             )
+            coarse_type = self._resolve_coarse_type(raw=raw, decay_profile=decay_profile)
             trace_summary = self._derive_trace_summary(
-                raw=raw,
                 decay_profile=decay_profile,
+                coarse_type=coarse_type,
             )
 
             event_id = str(raw.get("event_id") or raw.get("id") or "")
@@ -104,6 +105,7 @@ class LifeMemoryEngine:
                 pinned_flag=scored["pinned_flag"],
                 permanence_tier=scored["permanence_tier"],
                 decay_profile=decay_profile,
+                coarse_type=coarse_type,
                 detail_strength=scored["detail_strength"],
                 gist_strength=scored["gist_strength"],
                 detail_strength_base=scored["detail_strength_base"],
@@ -220,9 +222,10 @@ class LifeMemoryEngine:
                     scored_memory_type=scored["memory_type"],
                     pinned_flag=bool(scored["pinned_flag"]),
                 )
+                coarse_type = self._resolve_coarse_type(raw=raw, decay_profile=decay_profile)
                 trace_summary = self._derive_trace_summary(
-                    raw=raw,
                     decay_profile=decay_profile,
+                    coarse_type=coarse_type,
                 )
                 event_id = str(raw.get("event_id") or raw.get("id") or "")
                 entries.append(
@@ -254,6 +257,7 @@ class LifeMemoryEngine:
                         pinned_flag=scored["pinned_flag"],
                         permanence_tier=scored["permanence_tier"],
                         decay_profile=decay_profile,
+                        coarse_type=coarse_type,
                         detail_strength=scored["detail_strength"],
                         gist_strength=scored["gist_strength"],
                         detail_strength_base=scored["detail_strength_base"],
@@ -340,10 +344,28 @@ class LifeMemoryEngine:
         return "default"
 
     @staticmethod
-    def _derive_trace_summary(*, raw: dict[str, Any], decay_profile: str) -> str:
-        explicit = str(raw.get("trace_summary") or raw.get("trace") or "").strip()
-        if explicit:
+    def _resolve_coarse_type(*, raw: dict[str, Any], decay_profile: str) -> str:
+        valid = {"meal", "study", "relationship", "default"}
+        explicit = str(raw.get("coarse_type") or raw.get("recalled_kind") or "").strip().lower()
+        if explicit in valid:
             return explicit
+        event_type = str(raw.get("type") or "").strip().lower()
+        if event_type.startswith("recalled_"):
+            suffix = event_type.removeprefix("recalled_")
+            if suffix in valid:
+                return suffix
+        if decay_profile in {"meal", "study", "relationship"}:
+            return decay_profile
+        return "default"
+
+    @staticmethod
+    def _derive_trace_summary(*, decay_profile: str, coarse_type: str) -> str:
+        if coarse_type == "meal":
+            return "Had a meal around that time."
+        if coarse_type == "study":
+            return "Spent time on study-related activities."
+        if coarse_type == "relationship":
+            return "Had a relationship-relevant interaction."
         if decay_profile == "meal":
             return "Had a meal around that time."
         if decay_profile == "study":

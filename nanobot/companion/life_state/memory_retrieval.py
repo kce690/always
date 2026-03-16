@@ -43,12 +43,13 @@ def retrieve_memories(
         if relevance < cfg.retrieval.min_relevance and not entry.pinned_flag:
             continue
 
+        safe_gist = _gist_text(entry, recall_level=recall_level)
         if recall_level == "detail":
             score = relevance * detail_eff
             text = entry.detail_text
         elif recall_level == "gist":
             score = relevance * gist_eff * 0.92
-            text = entry.gist_summary
+            text = safe_gist
         else:
             score = relevance * max(gist_eff, detail_eff, _TRACE_MIN_SIGNAL) * 0.80
             text = _trace_text(entry)
@@ -56,7 +57,7 @@ def retrieve_memories(
             id=entry.id,
             recall_level=recall_level,
             text=text,
-            gist_summary=entry.gist_summary,
+            gist_summary=safe_gist,
             event_ids=list(entry.event_ids),
             relevance_score=relevance,
             detail_strength_effective=detail_eff,
@@ -64,6 +65,7 @@ def retrieve_memories(
             similarity_cluster_pressure=entry.similarity_cluster_pressure,
             permanence_tier=entry.permanence_tier,
             pinned_flag=entry.pinned_flag,
+            coarse_type=_coarse_type(entry),
         )
         out.append((score, evidence))
 
@@ -117,6 +119,9 @@ def _within(age_hours: float | None, limit_hours: float | None) -> bool:
 
 
 def _decay_profile(entry: MemoryEntry) -> str:
+    coarse = _coarse_type(entry)
+    if coarse in {"meal", "study", "relationship"}:
+        return coarse
     explicit = str(entry.decay_profile or "").strip().lower()
     if explicit in _PROFILE_WINDOWS_HOURS:
         return explicit
@@ -135,20 +140,60 @@ def _decay_profile(entry: MemoryEntry) -> str:
     return "default"
 
 
+def _coarse_type(entry: MemoryEntry) -> str:
+    explicit = str(entry.coarse_type or "").strip().lower()
+    if explicit in {"meal", "study", "relationship", "default"}:
+        return explicit
+    return "default"
+
+
+def _coarse_gist_text(entry: MemoryEntry) -> str:
+    coarse = _coarse_type(entry)
+    profile = _decay_profile(entry)
+    if coarse == "meal" or profile == "meal":
+        return "Had a meal in that period."
+    if coarse == "study" or profile == "study":
+        return "Was occupied with study/work tasks."
+    if coarse == "relationship" or profile == "relationship":
+        return "Had relationship-relevant interactions."
+    if profile == "anchor":
+        return "A long-term core milestone was involved."
+    return "A past event happened in that period."
+
+
+def _gist_text(entry: MemoryEntry, *, recall_level: str) -> str:
+    if recall_level == "detail":
+        explicit = str(entry.gist_summary or "").strip()
+        return explicit or _coarse_gist_text(entry)
+    return _coarse_gist_text(entry)
+
+
 def _trace_text(entry: MemoryEntry) -> str:
     explicit = str(entry.trace_summary or "").strip()
-    if explicit:
+    if explicit and not _looks_trace_too_specific(explicit):
         return explicit
     profile = _decay_profile(entry)
-    if profile == "meal":
+    coarse = _coarse_type(entry)
+    if coarse == "meal" or profile == "meal":
         return "Had a meal around that time."
-    if profile == "study":
+    if coarse == "study" or profile == "study":
         return "Spent time on study-related activities."
-    if profile == "relationship":
+    if coarse == "relationship" or profile == "relationship":
         return "Had a relationship-relevant interaction."
     if profile == "anchor":
         return "A long-term core milestone was involved."
     return "A past event happened in that period."
+
+
+def _looks_trace_too_specific(text: str) -> bool:
+    compact = str(text or "").strip()
+    if not compact:
+        return False
+    if len(compact) > 72:
+        return True
+    if re.search(r"(\d{1,2}:\d{2}|\d{1,2}am|\d{1,2}pm|\b\d{1,2}\b|=|\|)", compact, flags=re.IGNORECASE):
+        return True
+    return False
 
 
 def _relevance_score(

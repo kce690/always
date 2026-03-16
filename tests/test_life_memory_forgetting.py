@@ -280,6 +280,66 @@ async def test_record_recalled_event_sets_decay_profile_and_kind(tmp_path) -> No
 
 
 @pytest.mark.asyncio
+async def test_record_recalled_event_sets_coarse_type_and_safe_summaries(tmp_path) -> None:
+    service = LifeStateService(tmp_path)
+    out = await service.record_recalled_event(
+        summary="昨天中午12点吃了牛肉面",
+        source_turn="turn_y",
+    )
+
+    assert out is not None
+    assert out.get("coarse_type") == "meal"
+    assert out.get("gist") == "Had a meal in that period."
+    assert out.get("trace_summary") == "Had a meal around that time."
+
+    entries = service.memory_engine._load_entries()
+    assert entries
+    latest = entries[-1]
+    assert latest.coarse_type == "meal"
+    assert latest.trace_summary == "Had a meal around that time."
+
+
+def test_legacy_specific_trace_summary_is_sanitized_in_trace_level(tmp_path) -> None:
+    engine = _mk_engine(tmp_path)
+    t0 = now_local()
+    engine.store.save_memory_index(
+        {
+            "version": 1,
+            "updated_at": to_iso(t0),
+            "entries": [
+                {
+                    "id": "mem_legacy_trace_1",
+                    "event_ids": ["evt_legacy_trace_1"],
+                    "timestamp_first": to_iso(t0),
+                    "timestamp_last": to_iso(t0),
+                    "event_time_start": to_iso(t0),
+                    "event_time_end": to_iso(t0),
+                    "memory_type": "life_event",
+                    "decay_profile": "study",
+                    "gist_summary": "General memory: studied in that period.",
+                    "detail_text": "Studied linear algebra at 9am and reviewed determinants.",
+                    "trace_summary": "Studied linear algebra at 9am and reviewed determinants.",
+                    "importance": 0.8,
+                    "salience": 0.8,
+                    "detail_strength": 0.02,
+                    "gist_strength": 0.07,
+                    "detail_strength_base": 0.02,
+                    "gist_strength_base": 0.07,
+                }
+            ],
+        }
+    )
+
+    evidence = engine.retrieve("linear algebra determinants", now=t0, limit=3)
+    assert evidence
+    assert evidence[0].recall_level == "trace"
+    assert "linear algebra" not in evidence[0].text.lower()
+    assert "9am" not in evidence[0].text.lower()
+    assert "determinants" not in evidence[0].text.lower()
+    assert "linear algebra" not in evidence[0].gist_summary.lower()
+
+
+@pytest.mark.asyncio
 async def test_offline_catchup_updates_memory_index_consistently(tmp_path) -> None:
     service = LifeStateService(tmp_path)
     now = now_local()
